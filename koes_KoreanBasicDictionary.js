@@ -1,632 +1,557 @@
 /* global api */
 
 class koes_KoreanBasicDictionary {
-
     constructor(options) {
-        this.options = options || {};
-        this.maxexample = 3;
+        this.options = options;
+        this.maxexample = 2;
         this.word = '';
     }
 
     async displayName() {
-        return '한국어기초사전 KO→ES';
+        let locale = await api.locale();
+
+        if (locale.indexOf('EN') != -1)
+            return 'Korean -> Spanish | Korean Basic Dictionary';
+
+        return 'Coreano -> Español | 한국어기초사전';
     }
 
     setOptions(options) {
-        this.options = options || {};
-
-        if (this.options.maxexample) {
-            this.maxexample = Number(this.options.maxexample);
-        }
+        this.options = options;
+        this.maxexample = options.maxexample;
     }
 
     async findTerm(word) {
-
         this.word = word;
 
-        if (!word || !word.trim()) {
-            return [];
-        }
+        let results = await Promise.all([
+            this.findKoreanBasic(word)
+        ]);
 
-        return await this.searchDictionary(word.trim());
+        return [].concat(...results).filter(x => x);
     }
 
-    async searchDictionary(word) {
+    async findKoreanBasic(word) {
+        let notes = [];
 
-        const url =
-            'https://krdict.korean.go.kr/spa/dicSearch/SearchView?word=' +
-            encodeURIComponent(word);
+        if (!word)
+            return notes;
 
-        let html;
+        function T(node) {
+            if (!node)
+                return '';
+
+            return node.innerText.trim();
+        }
+
+        /*
+         * Korean Basic Dictionary
+         * Spanish interface
+         */
+        let base =
+            'https://krdict.korean.go.kr/spa/dicSearch/SearchView?word=';
+
+        let url = base + encodeURIComponent(word);
+
+        let doc = '';
 
         try {
-            html = await api.fetch(url);
-        } catch (error) {
+            let data = await api.fetch(url);
+
+            let parser = new DOMParser();
+
+            doc = parser.parseFromString(data, 'text/html');
+        } catch (err) {
             return [];
-        }
-
-        if (!html) {
-            return [];
-        }
-
-        let doc;
-
-        try {
-            const parser = new DOMParser();
-            doc = parser.parseFromString(html, 'text/html');
-        } catch (error) {
-            return [];
-        }
-
-        if (!doc || !doc.body) {
-            return [];
-        }
-
-        const entries = this.findEntries(doc);
-
-        if (!entries.length) {
-            return [];
-        }
-
-        const results = [];
-
-        for (const entry of entries) {
-
-            const result = this.parseEntry(entry);
-
-            if (result) {
-                results.push(result);
-            }
-        }
-
-        return results;
-    }
-
-    /*
-     * Locate dictionary entries.
-     *
-     * NIKL's page contains several blocks, so we first try
-     * common entry containers and then use the visible
-     * dictionary headings as a fallback.
-     */
-    findEntries(doc) {
-
-        const selectors = [
-            '.word_info',
-            '.search_result',
-            '.view_cont',
-            '.dic_cont',
-            '.entry',
-            '.result_list'
-        ];
-
-        for (const selector of selectors) {
-
-            const nodes = doc.querySelectorAll(selector);
-
-            if (nodes && nodes.length) {
-                return Array.from(nodes);
-            }
         }
 
         /*
-         * Fallback:
-         * locate elements containing "Categoría gramatical".
+         * Dictionary entry
+         *
+         * NIKL pages contain the result inside
+         * the word information area.
          */
-        const all = doc.querySelectorAll('div, li, section, article');
+        let dictionary =
+            doc.querySelector('.word_info') ||
+            doc.querySelector('.search_result') ||
+            doc.querySelector('.view_cont') ||
+            doc.querySelector('.dic_cont');
 
-        const entries = [];
-
-        for (const node of all) {
-
-            const text = this.cleanText(node.innerText);
-
-            if (!text) {
-                continue;
-            }
-
-            if (
-                text.includes('Categoría gramatical') &&
-                text.length < 15000
-            ) {
-                entries.push(node);
-            }
-        }
+        if (!dictionary)
+            return notes;
 
         /*
-         * Remove nested duplicates.
+         * Expression
          */
-        return entries.filter((node, index, array) => {
+        let expression = '';
 
-            return !array.some((other, otherIndex) => {
+        let expressionNode =
+            dictionary.querySelector('.word_title') ||
+            dictionary.querySelector('.word_title a') ||
+            dictionary.querySelector('.tit') ||
+            dictionary.querySelector('.tit a') ||
+            dictionary.querySelector('.word');
 
-                if (index === otherIndex) {
-                    return false;
-                }
-
-                return other.contains(node);
-            });
-        });
-    }
-
-    parseEntry(entry) {
-
-        const fullText = this.cleanText(entry.innerText);
-
-        if (!fullText) {
-            return null;
-        }
+        if (expressionNode)
+            expression = T(expressionNode);
 
         /*
-         * Headword
+         * Fallback to searched word
          */
-        let expression = this.extractExpression(entry);
+        if (!expression)
+            expression = word;
 
-        if (!expression) {
-            expression = this.word;
-        }
+        /*
+         * Remove Chinese characters / dictionary
+         * numbering from the expression.
+         *
+         * Example:
+         * 학교 (學校)
+         */
+        expression = expression
+            .replace(/\s*\([^)]*\)/g, '')
+            .replace(/\s*\^\{\d+\}/g, '')
+            .trim();
 
         /*
          * Pronunciation
          */
-        const reading = this.extractReading(entry);
+        let reading = '';
+
+        let pronunciation =
+            dictionary.querySelector('.pronunciation') ||
+            dictionary.querySelector('.pron') ||
+            dictionary.querySelector('.pronunciation_info') ||
+            dictionary.querySelector('.pron_info');
+
+        if (pronunciation) {
+            reading = T(pronunciation);
+
+            reading = reading
+                .replace(/^Pronunciación\s*/i, '')
+                .replace(/^\[/, '')
+                .replace(/\]$/, '')
+                .replace(/\s*듣기.*$/i, '')
+                .trim();
+        }
 
         /*
          * Part of speech
          */
-        const pos = this.extractPartOfSpeech(entry);
+        let pos = '';
+
+        let posNodes = dictionary.querySelectorAll('.pos');
+
+        if (posNodes && posNodes.length > 0) {
+            pos = T(posNodes[0]);
+        }
 
         /*
-         * Spanish meanings
+         * The Spanish page normally displays:
+         *
+         * Categoría gramatical
+         * 「명사」 Sustantivo
+         *
+         * So we also look through the visible text.
          */
-        const meanings = this.extractMeanings(entry);
+        if (!pos) {
+            let lines = dictionary.innerText
+                .split(/\n+/)
+                .map(x => x.trim())
+                .filter(Boolean);
+
+            for (let i = 0; i < lines.length; i++) {
+                if (
+                    lines[i]
+                        .toLowerCase()
+                        .includes('categoría gramatical')
+                ) {
+                    if (lines[i + 1]) {
+                        pos = lines[i + 1];
+                        break;
+                    }
+                }
+            }
+        }
+
+        /*
+         * Spanish translations
+         */
+        let definitions = [];
+
+        /*
+         * Look for the main Spanish meaning blocks.
+         */
+        let meaningSelectors = [
+            '.sense_translation',
+            '.translation',
+            '.trans_word',
+            '.mean',
+            '.meaning',
+            '.definition'
+        ];
+
+        let meaningNodes = [];
+
+        for (const selector of meaningSelectors) {
+            let nodes = dictionary.querySelectorAll(selector);
+
+            if (nodes && nodes.length > 0) {
+                meaningNodes = Array.from(nodes);
+                break;
+            }
+        }
+
+        /*
+         * If selectors are not available, parse the
+         * visible Spanish text after "Categoría gramatical".
+         */
+        if (meaningNodes.length === 0) {
+            let lines = dictionary.innerText
+                .split(/\n+/)
+                .map(x => x.trim())
+                .filter(Boolean);
+
+            let categoryFound = false;
+
+            for (let i = 0; i < lines.length; i++) {
+                let line = lines[i];
+
+                if (
+                    line
+                        .toLowerCase()
+                        .includes('categoría gramatical')
+                ) {
+                    categoryFound = true;
+                    continue;
+                }
+
+                if (!categoryFound)
+                    continue;
+
+                /*
+                 * Stop before the Korean definition/examples.
+                 */
+                if (
+                    /[\uac00-\ud7a3]/.test(line)
+                ) {
+                    continue;
+                }
+
+                if (
+                    line === 'Ejemplos' ||
+                    line.startsWith('Ejemplo') ||
+                    line.startsWith('Palabra de referencia') ||
+                    line.startsWith('Sinónimo') ||
+                    line.startsWith('Antónimo') ||
+                    line.startsWith('Palabra original') ||
+                    line.startsWith('Ver más')
+                ) {
+                    break;
+                }
+
+                /*
+                 * Avoid interface text.
+                 */
+                if (
+                    line === 'Pronunciación' ||
+                    line === 'Categoría gramatical'
+                ) {
+                    continue;
+                }
+
+                /*
+                 * Spanish translation
+                 */
+                if (
+                    /[a-záéíóúüñ]/i.test(line) &&
+                    line.length < 300
+                ) {
+                    if (!definitions.includes(line)) {
+                        definitions.push(line);
+                    }
+                }
+
+                /*
+                 * The first few Spanish lines are generally
+                 * the actual translations.
+                 */
+                if (definitions.length >= 20)
+                    break;
+            }
+        } else {
+            for (const node of meaningNodes) {
+                let meaning = T(node);
+
+                if (
+                    meaning &&
+                    !definitions.includes(meaning)
+                ) {
+                    definitions.push(meaning);
+                }
+            }
+        }
+
+        /*
+         * Examples
+         *
+         * The Spanish NIKL page contains Korean example
+         * sentences after the translations.
+         */
+        let examples = [];
+
+        let exampleSelectors = [
+            '.example',
+            '.example_sentence',
+            '.sentence',
+            '.ex'
+        ];
+
+        for (const selector of exampleSelectors) {
+            let nodes = dictionary.querySelectorAll(selector);
+
+            if (nodes && nodes.length > 0) {
+                for (const node of nodes) {
+                    let example = T(node);
+
+                    if (
+                        example &&
+                        !examples.includes(example)
+                    ) {
+                        examples.push(example);
+                    }
+
+                    if (examples.length >= this.maxexample)
+                        break;
+                }
+
+                break;
+            }
+        }
+
+        /*
+         * Fallback: search visible lines for Korean
+         * sentences after the first Spanish meanings.
+         */
+        if (examples.length === 0) {
+            let lines = dictionary.innerText
+                .split(/\n+/)
+                .map(x => x.trim())
+                .filter(Boolean);
+
+            let meaningStarted = false;
+
+            for (const line of lines) {
+
+                if (
+                    /[a-záéíóúüñ]/i.test(line) &&
+                    !/[\uac00-\ud7a3]/.test(line)
+                ) {
+                    if (
+                        line.length < 300 &&
+                        !line.startsWith('Categoría') &&
+                        !line.startsWith('Pronunciación')
+                    ) {
+                        meaningStarted = true;
+                    }
+
+                    continue;
+                }
+
+                if (!meaningStarted)
+                    continue;
+
+                /*
+                 * Korean example sentence
+                 */
+                if (
+                    /[\uac00-\ud7a3]/.test(line) &&
+                    line.length < 300
+                ) {
+                    /*
+                     * Ignore dictionary metadata.
+                     */
+                    if (
+                        line.includes('유의어') ||
+                        line.includes('반의어') ||
+                        line.includes('원어') ||
+                        line.includes('문형')
+                    ) {
+                        continue;
+                    }
+
+                    if (!examples.includes(line)) {
+                        examples.push(line);
+                    }
+                }
+
+                if (examples.length >= this.maxexample)
+                    break;
+            }
+        }
+
+        /*
+         * Extra information
+         */
+        let extrainfo = '';
+
+        if (pos) {
+            extrainfo =
+                `<span class="pos">${pos}</span>`;
+        }
+
+        /*
+         * Build definition
+         */
+        let definition = '';
+
+        for (const meaning of definitions) {
+            definition +=
+                `<div class="meaning">${meaning}</div>`;
+        }
 
         /*
          * Examples
          */
-        const examples = this.extractExamples(entry);
+        if (
+            examples.length > 0 &&
+            this.maxexample > 0
+        ) {
+            definition += '<ul class="sents">';
 
-        if (!meanings.length && !examples.length) {
-            return null;
-        }
-
-        let definition = '';
-
-        if (pos) {
-            definition +=
-                '<div class="koes-pos">' +
-                this.escapeHTML(pos) +
-                '</div>';
-        }
-
-        for (let i = 0; i < meanings.length; i++) {
-
-            definition +=
-                '<div class="koes-meaning">' +
-                '<span class="koes-number">' +
-                (i + 1) +
-                '.</span> ' +
-                this.escapeHTML(meanings[i]) +
-                '</div>';
-        }
-
-        if (examples.length) {
-
-            definition +=
-                '<div class="koes-examples-title">' +
-                'Ejemplos' +
-                '</div>';
-
-            for (const example of examples) {
-
-                definition +=
-                    '<div class="koes-example">' +
-                    this.escapeHTML(example) +
-                    '</div>';
-            }
-        }
-
-        return {
-            css: this.renderCSS(),
-            expression: expression,
-            reading: reading,
-            definitions: [definition],
-            audios: []
-        };
-    }
-
-    extractExpression(entry) {
-
-        const selectors = [
-            '.word_title',
-            '.word_title a',
-            '.tit',
-            '.tit a',
-            '.word',
-            '.headword',
-            'h3',
-            'h4'
-        ];
-
-        for (const selector of selectors) {
-
-            const node = entry.querySelector(selector);
-
-            if (!node) {
-                continue;
-            }
-
-            let value = this.cleanText(node.innerText);
-
-            if (!value) {
-                continue;
-            }
-
-            /*
-             * Remove common dictionary decorations.
-             */
-            value = value
-                .replace(/\s*\([^)]*\)\s*$/, '')
-                .replace(/\s*\[\d+\]\s*$/, '')
-                .trim();
-
-            if (value.length < 100) {
-                return value;
-            }
-        }
-
-        /*
-         * Fallback: first short Korean-looking line.
-         */
-        const lines = this.getLines(entry);
-
-        for (const line of lines) {
-
-            if (
-                /[\uac00-\ud7a3]/.test(line) &&
-                line.length < 80 &&
-                !line.includes('Categoría') &&
-                !line.includes('Pronunciación')
+            for (
+                let index = 0;
+                index < examples.length &&
+                index < this.maxexample;
+                index++
             ) {
-                return line;
-            }
-        }
-
-        return this.word;
-    }
-
-    extractReading(entry) {
-
-        const selectors = [
-            '.pronunciation',
-            '.pron',
-            '.pronunciation_info',
-            '.pron_info'
-        ];
-
-        for (const selector of selectors) {
-
-            const node = entry.querySelector(selector);
-
-            if (node) {
-
-                const value = this.cleanText(node.innerText);
-
-                if (value) {
-                    return value
-                        .replace(/^Pronunciación\s*/i, '')
-                        .trim();
-                }
-            }
-        }
-
-        /*
-         * Search text nodes/lines for [ ... ] pronunciation.
-         */
-        const lines = this.getLines(entry);
-
-        for (const line of lines) {
-
-            if (
-                line.includes('Pronunciación') &&
-                /\[[^\]]+\]/.test(line)
-            ) {
-
-                const match = line.match(/\[([^\]]+)\]/);
-
-                if (match) {
-                    return match[1].trim();
-                }
-            }
-        }
-
-        return '';
-    }
-
-    extractPartOfSpeech(entry) {
-
-        const lines = this.getLines(entry);
-
-        for (const line of lines) {
-
-            if (
-                line.toLowerCase()
-                    .includes('categoría gramatical')
-            ) {
+                let example = examples[index];
 
                 /*
-                 * Usually:
-                 *
-                 * Categoría gramatical
-                 * 「명사」 Sustantivo
+                 * Highlight the searched expression
                  */
-                const index = lines.indexOf(line);
+                let highlighted = example.replace(
+                    new RegExp(
+                        this.escapeRegExp(expression),
+                        'gi'
+                    ),
+                    '<b>$&</b>'
+                );
 
-                if (index !== -1 && lines[index + 1]) {
-                    return lines[index + 1].trim();
+                definition +=
+                    `<li class="sent">` +
+                    `<span class="ko_sent">` +
+                    highlighted +
+                    `</span>` +
+                    `</li>`;
+            }
+
+            definition += '</ul>';
+        }
+
+        /*
+         * Audio
+         */
+        let audios = [];
+
+        let audio =
+            dictionary.querySelector('audio') ||
+            dictionary.querySelector('audio source');
+
+        if (audio) {
+            let audioURL =
+                audio.getAttribute('src') ||
+                audio.getAttribute('data-src');
+
+            if (audioURL) {
+
+                if (audioURL.startsWith('//')) {
+                    audioURL = 'https:' + audioURL;
                 }
-            }
-        }
 
-        /*
-         * Direct selector fallback.
-         */
-        const selectors = [
-            '.pos',
-            '.part',
-            '.word_type',
-            '.word_pos'
-        ];
-
-        for (const selector of selectors) {
-
-            const node = entry.querySelector(selector);
-
-            if (node) {
-
-                const value = this.cleanText(node.innerText);
-
-                if (value) {
-                    return value;
+                else if (audioURL.startsWith('/')) {
+                    audioURL =
+                        'https://krdict.korean.go.kr' +
+                        audioURL;
                 }
-            }
-        }
 
-        return '';
-    }
-
-    extractMeanings(entry) {
-
-        const lines = this.getLines(entry);
-
-        const meanings = [];
-
-        let categoryFound = false;
-        let lookingForMeaning = false;
-
-        for (let i = 0; i < lines.length; i++) {
-
-            const line = lines[i];
-
-            if (
-                line.toLowerCase()
-                    .includes('categoría gramatical')
-            ) {
-                categoryFound = true;
-                continue;
-            }
-
-            if (!categoryFound) {
-                continue;
-            }
-
-            /*
-             * Stop when examples start.
-             */
-            if (
-                line.startsWith('Ejemplo') ||
-                line.startsWith('Estructura') ||
-                line.startsWith('Palabra original') ||
-                line.startsWith('Ver más')
-            ) {
-                break;
-            }
-
-            /*
-             * A Spanish translation usually follows
-             * the grammatical-category section.
-             *
-             * We ignore Korean definition sentences.
-             */
-            if (
-                this.isSpanishText(line) &&
-                !this.isInterfaceText(line) &&
-                line.length < 500
-            ) {
-
-                if (!meanings.includes(line)) {
-                    meanings.push(line);
-                }
+                audios.push(audioURL);
             }
         }
 
         /*
-         * The first Spanish lines after POS are generally
-         * the actual translations.
-         *
-         * Limit excessive page text.
+         * If no definition was found, don't return
+         * an empty dictionary entry.
          */
-        return meanings.slice(0, 20);
-    }
-
-    extractExamples(entry) {
-
-        const examples = [];
-
-        const lines = this.getLines(entry);
-
-        let started = false;
-
-        for (const line of lines) {
-
-            if (
-                line === 'Ejemplos' ||
-                line.startsWith('Ejemplo')
-            ) {
-                started = true;
-                continue;
-            }
-
-            if (!started) {
-                continue;
-            }
-
-            if (
-                line.startsWith('Estructura') ||
-                line.startsWith('Sinónimo') ||
-                line.startsWith('Antónimo') ||
-                line.startsWith('Palabra original') ||
-                line.startsWith('Ver más')
-            ) {
-                break;
-            }
-
-            /*
-             * Keep Korean example sentences.
-             */
-            if (
-                /[\uac00-\ud7a3]/.test(line) &&
-                line.length < 300 &&
-                !examples.includes(line)
-            ) {
-
-                examples.push(line);
-            }
-
-            if (examples.length >= this.maxexample) {
-                break;
-            }
-        }
-
-        return examples;
-    }
-
-    getLines(entry) {
-
-        if (!entry) {
-            return [];
-        }
-
-        return entry.innerText
-            .split(/\n+/)
-            .map(x => this.cleanText(x))
-            .filter(Boolean);
-    }
-
-    cleanText(value) {
-
-        if (!value) {
-            return '';
-        }
-
-        return value
-            .replace(/\u00a0/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-    }
-
-    isSpanishText(text) {
-
-        if (!text) {
-            return false;
-        }
+        if (!definition)
+            return notes;
 
         /*
-         * Korean definition text normally contains Hangul.
-         * Spanish translations generally don't.
+         * CSS
          */
-        const koreanCharacters =
-            (text.match(/[\uac00-\ud7a3]/g) || []).length;
-
-        if (koreanCharacters > 0) {
-            return false;
-        }
+        let css = this.renderCSS();
 
         /*
-         * Ignore navigation/UI strings.
+         * ODH result object
          */
-        return /[a-záéíóúüñ]/i.test(text);
+        notes.push({
+            css,
+            expression,
+            reading,
+            extrainfo,
+            definitions: [definition],
+            audios
+        });
+
+        return notes;
     }
 
-    isInterfaceText(text) {
-
-        const ignored = [
-            'Pronunciación',
-            'Categoría gramatical',
-            'Palabra derivada',
-            'Sinónimo',
-            'Antónimo',
-            'Estructura oracional',
-            'Palabra original',
-            'Ver más',
-            'Descargar',
-            'Imprimir',
-            'Buscar',
-            'Borrar'
-        ];
-
-        return ignored.some(x =>
-            text.toLowerCase() === x.toLowerCase()
+    escapeRegExp(value) {
+        return value.replace(
+            /[.*+?^${}()|[\]\\]/g,
+            '\\$&'
         );
     }
 
-    escapeHTML(value) {
-
-        return value
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#039;');
-    }
-
     renderCSS() {
+        let css = `
+            <style>
 
-        return `
-<style>
+                span.pos {
+                    display:inline-block;
+                    font-size:0.85em;
+                    margin-right:5px;
+                    padding:2px 6px;
+                    color:white;
+                    background-color:#0d47a1;
+                    border-radius:4px;
+                }
 
-.koes-pos {
-    display: inline-block;
-    margin: 2px 0 8px 0;
-    padding: 2px 7px;
-    border-radius: 4px;
-    font-size: 0.85em;
-    font-weight: 600;
-    opacity: 0.85;
-}
+                div.meaning {
+                    margin:4px 0;
+                    line-height:1.45;
+                }
 
-.koes-meaning {
-    margin: 4px 0;
-    line-height: 1.45;
-}
+                ul.sents {
+                    font-size:0.85em;
+                    list-style:square inside;
+                    margin:8px 0;
+                    padding:7px 10px;
+                    background:rgba(13,71,161,0.08);
+                    border-radius:5px;
+                }
 
-.koes-number {
-    font-weight: bold;
-}
+                li.sent {
+                    margin:4px 0;
+                    padding:0;
+                }
 
-.koes-examples-title {
-    margin-top: 12px;
-    margin-bottom: 5px;
-    font-weight: bold;
-}
+                span.ko_sent {
+                    line-height:1.45;
+                }
 
-.koes-example {
-    margin: 5px 0;
-    padding-left: 8px;
-    line-height: 1.45;
-}
+            </style>`;
 
-</style>
-`;
+        return css;
     }
 }
